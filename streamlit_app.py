@@ -3,6 +3,56 @@ import streamlit as st
 from app.interviewer import answer_turn, InterviewerFactory
 import uuid
 
+import hmac
+
+# Access to interviewer app (low level security but better than nothing)
+
+def check_password():
+    """Returns `True` if the user has entered the correct password."""
+    
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if hmac.compare_digest(
+            st.session_state["password"],
+            st.secrets["app_password"]  # Store password in secrets!
+        ):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store password in session
+        else:
+            st.session_state["password_correct"] = False
+
+    # First run or password not correct
+    if "password_correct" not in st.session_state:
+        # First run, show input for password
+        st.text_input(
+            "🔐 Enter Password to Access",
+            type="password",
+            on_change=password_entered,
+            key="password"
+        )
+        st.write("*Please contact the developer for access*")
+        return False
+    
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show input + error
+        st.text_input(
+            "🔐 Enter Password to Access",
+            type="password",
+            on_change=password_entered,
+            key="password"
+        )
+        st.error("😕 Password incorrect")
+        return False
+    
+    else:
+        # Password correct
+        return True
+
+# Check password before showing app
+if not check_password():
+    st.stop()  # Don't continue if password is wrong
+
+
 # Security validation
 
 def validate_input(text: str) -> tuple[bool, str]:

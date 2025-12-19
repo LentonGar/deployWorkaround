@@ -1,6 +1,5 @@
  ##Handles OpenAi connnections: isolates API
 
-
 from openai import OpenAI
 from app.config import Config
 

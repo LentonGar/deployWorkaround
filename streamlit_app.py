@@ -1,99 +1,14 @@
-
 import streamlit as st
 from app.interviewer import answer_turn, InterviewerFactory
-import uuid
+from app.auth import check_password
+from app.security import validate_input, wrap_user_input
+from app.cost_tracker import count_tokens, calculate_cost, format_cost
 
-import hmac
-
-# Access to interviewer app (low level security but better than nothing)
-
-def check_password():
-    """Returns `True` if the user has entered the correct password."""
-    
-    def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        if hmac.compare_digest(
-            st.session_state["password"],
-            st.secrets["app_password"]  # Store password in secrets!
-        ):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Don't store password in session
-        else:
-            st.session_state["password_correct"] = False
-
-    # First run or password not correct
-    if "password_correct" not in st.session_state:
-        # First run, show input for password
-        st.text_input(
-            "🔐 Enter Password to Access",
-            type="password",
-            on_change=password_entered,
-            key="password"
-        )
-        st.write("*Please contact the developer for access*")
-        return False
-    
-    elif not st.session_state["password_correct"]:
-        # Password incorrect, show input + error
-        st.text_input(
-            "🔐 Enter Password to Access",
-            type="password",
-            on_change=password_entered,
-            key="password"
-        )
-        st.error("😕 Password incorrect")
-        return False
-    
-    else:
-        # Password correct
-        return True
-
-# Check password before showing app
+# ==================== PASSWORD PROTECTION ====================
 if not check_password():
-    st.stop()  # Don't continue if password is wrong
+    st.stop()
 
-
-# Security validation
-
-def validate_input(text: str) -> tuple[bool, str]:
-    '''
-    Prevents prompt injection and abuse
-    Returns (is_valid, error_message)
-    '''
-    # Preventing token abuse
-    MAX_LENGTH = 1200
-    if len(text) > MAX_LENGTH:
-        return (False, f"Input too long! Max {MAX_LENGTH} characters. You used {len(text)}.")
-    
-    # Preventing prompt injection
-    forbidden_phrases = [
-        "ignore previous instructions","disregard all prior messages",
-        "you are no longer","forget you are",
-        "bypass your restrictions","break your programming",
-        "act as a different AI","malicious","harmful",
-        "illegal","unethical","pretend to be","jailbreak",
-        "pretend","imagine","disregard","bypass",
-        "override","disable","break","you are now",
-        "you are","forget"
-    ]
-
-    text_lower = text.lower()
-    for phrase in forbidden_phrases:
-        if phrase in text_lower:
-            return (False, "Input contains forbidden phrases. Please revise your input.")
-        
-    return True, ""
-
-def wrap_user_input(user_text: str) -> str:
-    """
-    Wraps user input with unique identifiers to prevent prompt injection.
-    AI treats anything in boundaries as NOT instructions to itself.
-    """ 
-    boundary = str(uuid.uuid4())
-    return f"""<USER_INPUT id="{boundary}">
-{user_text}
-</USER_INPUT>"""
-
+# ==================== STREAMLIT CONFIG ====================
 st.set_page_config(
     page_title="Interview Application",
     page_icon="🤖",
@@ -103,7 +18,16 @@ st.set_page_config(
 
 st.title("🤖 Interview Practice bot")
 
-# Initialize settings tracking
+# ==================== INITIALIZE SESSION STATE ====================
+if "total_cost" not in st.session_state:
+    st.session_state.total_cost = 0.0
+if "total_input_tokens" not in st.session_state:
+    st.session_state.total_input_tokens = 0
+if "total_output_tokens" not in st.session_state:
+    st.session_state.total_output_tokens = 0
+if "session_messages" not in st.session_state:
+    st.session_state.session_messages = 0
+
 if "interviewer_settings" not in st.session_state:
     st.session_state.interviewer_settings = {
         "job_role": "",
@@ -112,23 +36,37 @@ if "interviewer_settings" not in st.session_state:
         "technique": "Zero-shot"
     }
 
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hi, I am your interviewer. Ready to go?"}
+    ]
+
+# ==================== SIDEBAR ====================
 with st.sidebar:
     st.header("Setup for the interview bot")
 
     job_role = st.text_input(
         "Job role (e.g., 'Python Backend Engineer at Google')",
-        value=st.session_state.interviewer_settings["job_role"])
-    skills = st.text_input("Skills to focus on (e.g., 'Django, REST, SQL')",
-                           value=st.session_state.interviewer_settings["skills"])
-    difficulty = st.selectbox("Difficulty level", ["Easy", "Medium", "Hard"],
-                              index=["Easy", "Medium", "Hard"].index(
-                                 st.session_state.interviewer_settings["difficulty"]))
+        value=st.session_state.interviewer_settings["job_role"]
+    )
+    skills = st.text_input(
+        "Skills to focus on (e.g., 'Django, REST, SQL')",
+        value=st.session_state.interviewer_settings["skills"]
+    )
+    difficulty = st.selectbox(
+        "Difficulty level",
+        ["Easy", "Medium", "Hard"],
+        index=["Easy", "Medium", "Hard"].index(
+            st.session_state.interviewer_settings["difficulty"]
+        )
+    )
 
     prompt_technique = st.selectbox(
         "Prompt Technique",
-        ["Zero-shot", "Few-shot", "Chain-of-Thought", "Role-Play"],
-        index=["Zero-shot", "Few-shot", "Chain-of-Thought", "Role-Play"].index(
-            st.session_state.interviewer_settings["technique"])
+        ["Zero-shot", "Few-shot", "Chain-of-Thought", "Dynamic", "Least-to-Most"],
+        index=["Zero-shot", "Few-shot", "Chain-of-Thought", "Dynamic", "Least-to-Most"].index(
+            st.session_state.interviewer_settings["technique"]
+        )
     )
 
     st.divider()
@@ -142,7 +80,7 @@ with st.sidebar:
         help="Lower = more focused, Higher = more creative/varied"
     )
 
-     # Settings change detection
+    # Settings change detection
     current_settings = {
         "job_role": job_role,
         "skills": skills,
@@ -153,56 +91,101 @@ with st.sidebar:
     if current_settings != st.session_state.interviewer_settings:
         st.warning("⚠️ Settings changed! Click 'Reset Interview' to apply.")
         if st.button("🔄 Reset Interview"):
-            # Update settings
             st.session_state.interviewer_settings = current_settings
-            
-            # Use factory to reset
             InterviewerFactory.reset(st.session_state, "interviewer")
-            
-            # Reset UI messages
             st.session_state.messages = [
                 {"role": "assistant", "content": "Hi, I am your interviewer. Ready to go?"}
             ]
             st.rerun()
-#Initialise chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hi, I am your interviewer. Ready to go?"}
-    ]
 
+    # Cost tracking display
+    st.divider()
+    st.subheader("💰 Cost Tracking")
+
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric(
+            "Total Cost",
+            format_cost(st.session_state.total_cost),
+            help="Estimated API cost for this session"
+        )
+    
+    with col2:
+        st.metric(
+            "Messages",
+            st.session_state.session_messages,
+            help="Number of messages sent"
+        )
+    
+    with st.expander("📊 Token Details"):
+        st.write(f"**Input tokens:** {st.session_state.total_input_tokens:,}")
+        st.write(f"**Output tokens:** {st.session_state.total_output_tokens:,}")
+        st.write(f"**Total tokens:** {st.session_state.total_input_tokens + st.session_state.total_output_tokens:,}")
+        
+        st.divider()
+        model = "gpt-4o-mini"
+        st.caption(f"**Pricing ({model}):**")
+        st.caption("• Input: $0.150/1M tokens")
+        st.caption("• Output: $0.600/1M tokens")
+    
+    if st.button("🔄 Reset Usage Stats"):
+        st.session_state.total_cost = 0.0
+        st.session_state.total_input_tokens = 0
+        st.session_state.total_output_tokens = 0
+        st.session_state.session_messages = 0
+        st.success("Usage stats reset!")
+        st.rerun()
+
+# ==================== CHAT INTERFACE ====================
 # Render chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input for user
+# Chat input
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
-    # Add user message to chat history
+    # Validate input
     is_valid, error_msg = validate_input(prompt)
-
     if not is_valid:
         st.error(f"Input validation error: {error_msg}")
         st.stop()
 
+    # Wrap for security
     wrapped_prompt = wrap_user_input(prompt)
     
+    # Display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     
- # Use factory-based answer_turn
+    # Count input tokens
+    input_tokens = count_tokens(wrapped_prompt, model="gpt-4o-mini")
+    
+    # Get AI response
     bot_reply = answer_turn(
-        storage=st.session_state,  # Pass session state as storage
+        storage=st.session_state,
         user_message=wrapped_prompt,
-        job_role=st.session_state.interviewer_settings["job_role"],
-        skills=st.session_state.interviewer_settings["skills"],
-        difficulty=st.session_state.interviewer_settings["difficulty"],
-        technique=st.session_state.interviewer_settings["technique"],
+        job_role=job_role,
+        skills=skills,
+        difficulty=difficulty,
+        technique=prompt_technique,
         temperature=temperature
     )
 
+    # Calculate output tokens and cost
+    output_tokens = count_tokens(bot_reply, model="gpt-4o-mini")
+    turn_cost = calculate_cost(input_tokens, output_tokens, model="gpt-4o-mini")
+    
+    # Update tracking
+    st.session_state.total_input_tokens += input_tokens
+    st.session_state.total_output_tokens += output_tokens
+    st.session_state.total_cost += turn_cost
+    st.session_state.session_messages += 1
+
+    # Display AI response
     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     with st.chat_message("assistant"):
-        st.markdown(bot_reply)    
+        st.markdown(bot_reply)
